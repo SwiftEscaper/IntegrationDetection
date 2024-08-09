@@ -6,12 +6,20 @@ import os
 import numpy as np
 import json
 
-from keras.preprocessing import image
+from typing import Union, Dict, Any
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi import BackgroundTasks, FastAPI
+import requests
 
 import CrashDetection
 import GetFrame
+import server
 
 import tensorflow as tf
+
+
+# app = FastAPI()
 
 model = tf.keras.models.load_model('C:/vgg16_1.h5')
 
@@ -95,6 +103,7 @@ def main():
         img_array = np.asarray(img_resized)
         img_array = np.expand_dims(img_array, axis=0)
         
+        '''
         input_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)  # TensorFlow 텐서로 변환
         prediction = predict_function(input_tensor)
 
@@ -104,9 +113,11 @@ def main():
         # 일단 임의로 지정함
         if prediction[0][0] < prediction[0][1]:
             accident_flag = 1
+        '''
         
         times = cur_time - prev_time
-        cars_dict = CrashDetection.update_car_data(cars_dict, bounding_boxes, track_ids, times)
+        if cars_dict:
+            cars_dict = CrashDetection.update_car_data(cars_dict, bounding_boxes, track_ids, times)
         
         CrashDetection.remove_missing_cars(cars_dict, track_ids, frames_since_last_seen, max_frames_missing)
                       
@@ -115,13 +126,13 @@ def main():
             CrashDetection.track_log(cars_dict, counter, track_ids, log_directory)  
 
         # 100 프레임마다 계산
+        # logfile에 값 기록하는건 100 프레임마다
         if accident_flag not in (1, 2) and counter % 100 == 0:
             
             result, checks, cars_data, overlapped, frame_overlapped = CrashDetection.analyze_cars(
                 cars_dict, counter, filter_flag=1, T_var=10, k_overlap=0.5, T_acc=2, 
                 frame_overlapped_interval=5, trajectory_thresold=15
             )
-            
             
             reusltThreshold = 1.99
             # 이건 위치 계산
@@ -156,28 +167,25 @@ def main():
         counter = counter + 1
         
         # 사고라면
-        if accident_flag in (1, 2):
-            # 파일에 기록
-            with open('result.txt', 'a') as file:
-                file.write(f'accident location: (lat, lng) -> ({accident_lat}, {accident_lng})\n')
-                file.write(f'accident type: {accident_flag}\n\n')
-            accident_flag = 0
-            
-            
-            accident_info = {
-                'accident_location': {
-                    'latitude': accident_lat,
-                    'longitude': accident_lng
-                },
-                'accident_type': accident_flag
+        if True: # 서버 test를 위해 매frame마다 전송
+        #if accident_flag in (1, 2):
+            accident_data = {
+                'accident_type': 10,
+                'latitude': accident_lat,
+                'longitude': accident_lng
             }
             
-            '''
-            # JSON 형식으로 파일에 기록
-            with open('result.json', 'a') as file:
-                json.dump(accident_info, file)
-                file.write('\n')  # 각 사고 정보를 새 줄에 기록
-            '''
+            try:
+                response = requests.post("http://127.0.0.1:8000/accident/", json=accident_data)
+                with open('logfile.txt', 'a') as file:
+                    file.write(str(response.json()))
+                    file.write('server success\n\n')
+            except Exception as e:
+                print(f"Error occurred while reporting accident: {e}")
+                
+            # break  # Exit loop after detecting accident
+    
+    return accident_data
     
 
 if __name__ == "__main__":
