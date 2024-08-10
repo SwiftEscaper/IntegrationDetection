@@ -1,25 +1,15 @@
-from keras.models import load_model
 import time
+import numpy as np
 from collections import defaultdict
 import cv2
-import os
-import numpy as np
-import json
-
-from typing import Union, Dict, Any
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi import BackgroundTasks, FastAPI
 import requests
+from keras.models import load_model
+import tensorflow as tf
+import threading
 
+import log
 import CrashDetection
 import GetFrame
-import server
-
-import tensorflow as tf
-
-
-# app = FastAPI()
 
 model = tf.keras.models.load_model('C:/vgg16_1.h5')
 
@@ -30,72 +20,47 @@ def predict_function(input_tensor):
 
 def main():
     accident_flag = 0
+    model_path = "yolov8n.pt"
     
     # 로그 파일 디렉토리 설정
-    log_directory = CrashDetection.setup_track_log()
-    #######################################################################
-    # CCTV API 설정
-    lat = 37.517423  # 위도
-    lng = 127.179039  # 경도
-    accident_lat, accident_lng = lat, lng
-    #######################################################################
-    model_path = "yolov8n.pt"
-    cctv_data = GetFrame.get_cctv_data(lat, lng)
+    log_directory = log.setup_log()
     
-    model, video = CrashDetection.init_model(model_path, cctv_data['cctvurl'])
+    #######################################################################
+    
+    # CCTV API 설정 (위도 / 경도)
+    lat, lng = 37.517423, 127.17903
+    accident_lat, accident_lng = lat, lng
+    
+    cctv_url, processed_name = GetFrame.get_cctv_data(lat, lng)
+    
+    #######################################################################
+    model, video = CrashDetection.init_model(model_path, cctv_url)
 
     counter, cars_dict, images_saved = 1, {}, []
-    
-    # cars_dict: 차량은 고유 라벨로 식별
-    '''
-    cars_dict = {
-        '1': [
-            [[center1_frame1, center1_frame2, ...]],  # 중심점 리스트
-            [[[vector1_frame1], [vector1_frame2], ...]],  # 위치 벡터 리스트
-            [velocity1_frame1, velocity1_frame2, ...],  # 속도 리스트
-            [acceleration1_frame1, acceleration1_frame2, ...],  # 가속도 리스트
-            [x, y, w, h]  # 박스 정보
-        ],
-    }
-    '''
-
-    # 사라진 차량 기록
+    # 사라진 차량 기록 / 차량이 사라졌다고 간주되는 최대 프레임 수 (조정 필요)
     frames_since_last_seen = defaultdict(lambda: 0)
-    # 차량이 사라졌다고 간주되는 최대 프레임 수 (조정 필요)
-    max_frames_missing = 30
-
-    prev_time, cur_time = 0, 0
-
-    if os.path.isfile('fire.txt'):
-        os.remove('fire.txt')
-        
-    if os.path.isfile('result.txt'):
-        os.remove('result.txt')
-
+    max_frames_missing = 15
+    prev_time, cur_time = time.time(), time.time()
 
     while True:
-        
-        prev_time = cur_time
+        # 시간 측정
         cur_time = time.time()
+        times = cur_time - prev_time # 한 프레임 당 처리 시간
+        prev_time = cur_time
         
         print(f'Processing frame: {counter}')
-        tracks, frame = GetFrame.process_frame(video, model)
         
-        bounding_boxes = tracks[0].boxes.xywh.cpu() # return x, y, w, h
-        track_ids = tracks[0].boxes.id
+        #######################################################################
         
-        tracks = (bounding_boxes, track_ids)
-
-        if track_ids is None:
-            track_ids = []
-        else:
-            track_ids = track_ids.int().cpu().tolist()
+        frame, bounding_boxes, track_ids = GetFrame.process_frame(video, model)
+        # cars_dict에 저장
         
         if frame is None:
             break
-        images_saved.append(frame)  # 배열에 이미지 저장 -> 나중에 사고 영역 출력에 사용
-        bounding_boxes, track_ids = tracks
         
+        images_saved.append(frame)  # 배열에 이미지 저장 -> 나중에 사고 영역 출력에 사용
+        
+        #######################################################################
         
         # 이미지 전처리
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -103,60 +68,48 @@ def main():
         img_array = np.asarray(img_resized)
         img_array = np.expand_dims(img_array, axis=0)
         
-        '''
         input_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)  # TensorFlow 텐서로 변환
         prediction = predict_function(input_tensor)
-
-        with open('fire.txt', 'a') as file:
-            file.write(f'Fire Result: {prediction}\n')
+            
+        log.fire_value_log(prediction)  # 결과 저장
         
         # 일단 임의로 지정함
         if prediction[0][0] < prediction[0][1]:
             accident_flag = 1
-        '''
         
-        times = cur_time - prev_time
-        if cars_dict:
-            cars_dict = CrashDetection.update_car_data(cars_dict, bounding_boxes, track_ids, times)
+        #######################################################################
         
+        # 이전 기록이 있으면 기록 업데이트
+        cars_dict = CrashDetection.update_car_data(cars_dict, bounding_boxes, track_ids, times)
+        
+        
+        
+        # frame에서 사라진 차량 기록
         CrashDetection.remove_missing_cars(cars_dict, track_ids, frames_since_last_seen, max_frames_missing)
                       
         # 추적 ID log
         if counter % 50 == 0:
-            CrashDetection.track_log(cars_dict, counter, track_ids, log_directory)  
+            log.track_log(cars_dict, counter, track_ids, log_directory)  
 
-        # 100 프레임마다 계산
-        # logfile에 값 기록하는건 100 프레임마다
+        # 사고가 감지되지 않았을 때 100 프레임마다 계산
         if accident_flag not in (1, 2) and counter % 100 == 0:
             
+            # overlapped: set type, 프레임 내에서 충돌하거나 겹친 차량들의 고유 ID를 저장
+            # frame_overlapped: 차량들이 충돌하거나 겹쳤다고 판단된 프레임의 번호
             result, checks, cars_data, overlapped, frame_overlapped = CrashDetection.analyze_cars(
                 cars_dict, counter, filter_flag=1, T_var=10, k_overlap=0.5, T_acc=2, 
                 frame_overlapped_interval=5, trajectory_thresold=15
             )
             
             reusltThreshold = 1.99
-            # 이건 위치 계산
             
-            # 사고 지점 위도 경도 구하기 (예: 1 픽셀 이동당 0.00001도 변화)
+            # len(overlapped): 오류 없는지 확인 -> 충돌 사고 판단 알고리즘 수정하기...
             if result > reusltThreshold and len(overlapped) > 0:
                 accident_flag = 2
                 
-                # overlapped에서 첫 번째 차량을 가져옴
-                first_car = list(overlapped)[0]
-                
-                # 사고 지점에서의 픽셀 좌표 변화
-                accident_x = cars_data[first_car]['x'][frame_overlapped]
-                accident_y = cars_data[first_car]['y'][frame_overlapped]
+                accident_lat, accident_lng = CrashDetection.calculation_location(overlapped, cars_data, frame_overlapped,)
 
-                # 픽셀 좌표를 위도 경도 변화로 변환 (간단한 선형 변환 사용)
-                # 실제 환경에서는 정확한 매핑을 위해 추가적인 보정 필요
-                lat_change_per_pixel = 0.00001  # 위도 변화율 (가정)
-                lng_change_per_pixel = 0.00001  # 경도 변화율 (가정)
-
-                accident_lat += (accident_y * lat_change_per_pixel)
-                accident_lng += (accident_x * lng_change_per_pixel)
-                
-            CrashDetection.save_results(counter, result, reusltThreshold, checks=checks, 
+            log.final_log(counter, result, reusltThreshold,  
                          overlapped=overlapped, frame_overlapped=frame_overlapped, 
                          cars_data=cars_data, lat=accident_lat, lng=accident_lng, images_saved=images_saved)
         
@@ -166,26 +119,26 @@ def main():
         
         counter = counter + 1
         
-        # 사고라면
-        if True: # 서버 test를 위해 매frame마다 전송
-        #if accident_flag in (1, 2):
+        #if True: # 서버 test를 위해 매frame마다 전송
+        if accident_flag in (1, 2):  # 사고라면
             accident_data = {
-                'accident_type': 10,
+                'tunnel_name': processed_name,
+                'accident_type': accident_flag,
                 'latitude': accident_lat,
                 'longitude': accident_lng
             }
             
+            '''
             try:
                 response = requests.post("http://127.0.0.1:8000/accident/", json=accident_data)
-                with open('logfile.txt', 'a') as file:
+                with open('final.txt', 'a', encoding='utf-8') as file:
                     file.write(str(response.json()))
-                    file.write('server success\n\n')
+                    file.write(' -> server success\n\n')
             except Exception as e:
                 print(f"Error occurred while reporting accident: {e}")
+            '''
                 
             # break  # Exit loop after detecting accident
-    
-    return accident_data
     
 
 if __name__ == "__main__":
