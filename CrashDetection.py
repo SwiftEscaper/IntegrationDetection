@@ -15,91 +15,11 @@ from ultralytics import YOLO
 import CrashFilter as trackingpy # functions for tracking
 import CrashCheck as accidentspy # functions for detection
 
-def setup_track_log():
-    if os.path.exists('logs'):
-        shutil.rmtree('logs')
-    log_directory = 'logs'
-    os.makedirs(log_directory, exist_ok=True)
-    
-    if os.path.isfile('logfile.txt'):
-        os.remove('logfile.txt')
-
-    return log_directory
-
-def track_log(cars_dict, version, track_ids, log_directory):
-    # 텍스트 파일 경로
-    log_file_path = os.path.join(log_directory, f'version{version}.txt')
-    
-    # 파일에 데이터 저장
-    with open(log_file_path, 'w') as file:
-        file.write(f"Track ID(YOLO): {track_ids}\n\n")
-        for car_id, data in cars_dict.items():
-            file.write(f"Car ID(in Dict): {car_id}\n")
-
-def get_cctv_data(lat, lng):
-    # 국가교통정보센터 API
-    # return으로 위도, 경도 값 알 수 있음 -> 나중에 위치 반환할 때 사용
-    # coordx: 경도 좌표, coordy: 위도 좌표
-    # lat: 위도, lng: 경도
-
-    # CCTV 탐색 범위 지정을 위해 임의로 ±1
-    minX = str(lng-1)  # 최소 경도 영역
-    maxX = str(lng+1)  # 최대 경도 영역
-    minY = str(lat-1)  # 최소 위도 영역
-    maxY = str(lat+1)  # 최대 위도 영역
-
-    # getType: 출력 결과 형식(xml, json / 기본: xml)
-    api_call = 'https://openapi.its.go.kr:9443/cctvInfo?' \
-            'apiKey=ea732642a365461f96f8ea3b63c00317' \
-            '&type=ex&cctvType=1' \
-            '&minX=' + minX + \
-            '&maxX=' + maxX + \
-            '&minY=' + minY + \
-            '&maxY=' + maxY + \
-            '&getType=json'
-                
-    dataset = requests.get(api_call).json()
-    cctv_data = dataset['response']['data']
-
-    coordx_list = []
-    for index, data in enumerate(cctv_data):
-        xy_couple = (float(cctv_data[index]['coordy']),float(cctv_data[index]['coordx']))
-        coordx_list.append(xy_couple)
-
-    # 입력한 위경도 좌표에서 가장 가까운 위치에 있는 CCTV를 찾는 과정
-    coordx_list = np.array(coordx_list)
-    leftbottom = np.array((lat, lng))
-    distances = np.linalg.norm(coordx_list - leftbottom, axis=1)
-    min_index = np.argmin(distances)
-
-    print('CCTV:', cctv_data[min_index]['cctvname'])
-    
-    return cctv_data[min_index]
 
 def init_model(model_path, video_url):
     model = YOLO(model_path)
     video = cv2.VideoCapture(video_url)
     return model, video
-
-def process_frame(video, model):
-    retval, image = video.read()  # retval: 성공하면 True
-    if not retval:
-        return None, None
-
-    # conf: 최소 신뢰도 임계값 (이 임계값 미만으로 감지된 객체는 무시)
-    # iou: 값이 낮을수록 겹치는 상자가 제거되어 중복을 줄이는 데 유용 (default: 0.7)
-    tracks = model.track(image, persist=True, classes=[2, 3, 5, 7], conf=0.25, iou=0.7)
-    image = tracks[0].plot()
-    
-    bounding_boxes = tracks[0].boxes.xywh.cpu() # return x, y, w, h
-    track_ids = tracks[0].boxes.id
-
-    if track_ids is None:
-        track_ids = []
-    else:
-        track_ids = track_ids.int().cpu().tolist()
-
-    return image, (bounding_boxes, track_ids)
 
 def update_car_data(cars_dict, bounding_boxes, track_ids, times):
     # 각 객체의 위치를 기록 업데이트
@@ -109,7 +29,7 @@ def update_car_data(cars_dict, bounding_boxes, track_ids, times):
         x, y, w, h = map(int, box)  # 박스 좌표 (이때 x, y는 센터 좌표)
         box = [int(x - w / 2), int(y - h / 2), w, h]  # 좌측 하단 point 저장
         
-        if track_id not in cars_dict:
+        if track_id not in list(cars_dict.keys()):
             cars_dict[track_id] = [[[x, y]], [[0, 0]], [0], [0], box]
         else:
             prev_center = cars_dict[track_id][0][-1]
@@ -122,11 +42,15 @@ def update_car_data(cars_dict, bounding_boxes, track_ids, times):
             cars_dict[track_id][1].append(motion_vector)  # 새로운 위치 벡터 추가
 
             prev_velocity = cars_dict[track_id][2][-1]
-            current_velocity = distance / times
+            if times > 0:
+                current_velocity = distance / times
+            else: current_velocity = 0
             cars_dict[track_id][2].append(current_velocity)  # 새로운 속도 추가
 
-            vec_diff = abs(current_velocity - prev_velocity)
-            current_acceleration = vec_diff / times
+            vec_diff = abs(current_velocity - prev_velocity) if not np.isnan(current_velocity) and not np.isnan(prev_velocity) else 0
+            if times > 0:
+                current_acceleration = vec_diff / times
+            else: current_acceleration = 0
             cars_dict[track_id][3].append(current_acceleration)  # 새로운 가속도 추가
 
             cars_dict[track_id][4] = box  # 박스 정보 업데이트
@@ -251,19 +175,19 @@ def analyze_cars(cars_dict, counter, filter_flag, T_var, k_overlap, T_acc, frame
     result = sum(checks)
     return result, checks, cars_data, overlapped, frame_overlapped
 
-def save_results(counter, result, reusltThreshold, checks, overlapped, frame_overlapped, cars_data, images_saved, lat, lng, output_dir='output'):
-    log_file_path = 'logfile.txt'
+def calculation_location(overlapped, cars_data, frame_overlapped, accident_lat, accident_lng):
+    first_car = list(overlapped)[0]
+    
+    accident_x = cars_data[first_car]['x'][frame_overlapped]
+    accident_y = cars_data[first_car]['y'][frame_overlapped]
 
-    with open(log_file_path, 'a') as file:
-        file.write(f'Frame: {counter}, Score: {result}\n')
-        if result >= reusltThreshold:
-            file.write(f'Accident happened at frame {frame_overlapped} between cars {overlapped}\n')
-            file.write(f'lat: {lat} lng: {lng}\n\n')
-            
-            image = images_saved[frame_overlapped]
-            for car_label in overlapped:
-                cv2.circle(image, (int(cars_data[car_label]['x'][frame_overlapped]), int(cars_data[car_label]['y'][frame_overlapped])), 50, (255, 255, 0), 2)
+    # 픽셀 좌표를 위도 경도 변화로 변환 (간단한 선형 변환 사용)
+    # 예: 1 픽셀 이동당 0.00001도 변화
+    # 실제 환경에서는 정확한 매핑을 위해 추가적인 보정 필요
+    lat_change_per_pixel = 0.00001  # 위도 변화율 (가정)
+    lng_change_per_pixel = 0.00001  # 경도 변화율 (가정)
 
-            cv2.imwrite(os.path.join(output_dir, 'accident.png'), image)
-            
-    cv2.imwrite(os.path.join(output_dir, 'final_frame.png'), images_saved[-1])
+    accident_lat += (accident_y * lat_change_per_pixel)
+    accident_lng += (accident_x * lng_change_per_pixel)
+    
+    return accident_lat, accident_lng

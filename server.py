@@ -13,6 +13,7 @@ from pydantic import BaseModel
 app = FastAPI()
 
 class Info(BaseModel):
+    tunnel_name: str
     accident_type: int
     latitude: float
     longitude: float
