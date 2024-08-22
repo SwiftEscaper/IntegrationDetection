@@ -17,7 +17,7 @@ def get_cctv_data(lat, lng):
     maxY = str(lat+1)  # 최대 위도 영역
 
     api_call = 'https://openapi.its.go.kr:9443/cctvInfo?' \
-            'apiKey=ea732642a365461f96f8ea3b63c00317' \
+            'apiKey=19d87e10ec6a47938d779192bd5ef763' \
             '&type=ex&cctvType=1' \
             '&minX=' + minX + \
             '&maxX=' + maxX + \

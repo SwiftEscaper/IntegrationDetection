@@ -92,8 +92,9 @@ def check_overlap(cars_data, cars_labels_to_analyze, k_overlap, counter):
                     if flag:
                         frame_overlapped = frame
                         flag = 0
-                                
-    checks[0] = 1.0 if not flag else 0.5
+       
+    # checks[0] = 1.0 if not flag else 0.5                         
+    checks[0] = 0.0 if not flag else 0.0
     return checks, overlapped, frame_overlapped
 
 def check_acceleration_anomaly(cars_data, potential_cars_labels, frame_overlapped, frame_overlapped_interval, T_acc):
@@ -165,13 +166,38 @@ def analyze_cars(cars_dict, counter, filter_flag, T_var, k_overlap, T_acc, frame
 
     checks, overlapped, frame_overlapped = check_overlap(cars_data, cars_labels_to_analyze, k_overlap, counter)
     
+    ##### 이거 수정
+    acc_diff = check_acceleration_anomaly(cars_data, overlapped, frame_overlapped, frame_overlapped_interval, T_acc)
+    max_angle_change = check_angle_anomaly(cars_data, overlapped, frame_overlapped, frame_overlapped_interval, trajectory_thresold)
+    
+    # checks[1] = 1.0 if acc_diff >= T_acc else 0.5
+    # checks[2] = 1.0 if max_angle_change >= trajectory_thresold else 0.5
+    
+    if acc_diff >= T_acc:
+        checks[1] = 1.0
+    else: 
+        checks[1] = 0.5
+        
+    if max_angle_change >= trajectory_thresold :
+        checks[2] = 1.0
+    else: 
+        checks[2] = 0.5
+        
+    with open('txt_file/acc.txt', 'a') as file:
+        file.write(f'Acc Result: {checks[1]}\n')
+    
+    with open('txt_file/traj.txt', 'a') as file:
+        file.write(f'Traj Result: {checks[2]}\n')
+    
+    ####################################################################################################################### 이거 수정
+    '''
     if checks[0] == 1.0:
         acc_diff = check_acceleration_anomaly(cars_data, overlapped, frame_overlapped, frame_overlapped_interval, T_acc)
         checks[1] = 1.0 if acc_diff >= T_acc else 0.5
         
         max_angle_change = check_angle_anomaly(cars_data, overlapped, frame_overlapped, frame_overlapped_interval, trajectory_thresold)
         checks[2] = 1.0 if max_angle_change >= trajectory_thresold else 0.5
-
+    '''
     result = sum(checks)
     return result, checks, cars_data, overlapped, frame_overlapped
 
@@ -191,3 +217,85 @@ def calculation_location(overlapped, cars_data, frame_overlapped, accident_lat, 
     accident_lng += (accident_x * lng_change_per_pixel)
     
     return accident_lat, accident_lng
+
+
+# cars_dict: 현재 추적하고 있는 car의 정보
+'''
+cars_dict = {
+    '1': [
+        [[center1_frame1, center1_frame2, ...]],  # 중심점 리스트
+        [[[vector1_frame1], [vector1_frame2], ...]],  # 위치 벡터 리스트
+        [velocity1_frame1, velocity1_frame2, ...],  # 속도 리스트
+        [acceleration1_frame1, acceleration1_frame2, ...],  # 가속도 리스트
+        [x, y, w, h]  # 박스 정보
+    ],
+}
+'''
+# counter: 프레임 번호
+# 여기에서 1분동안 (100개의 프레임동안) x, y 좌표 차이가 크게 달라지지 않으면 사고라고 감지 (return true)
+
+def stop_detection(cars_dict):
+    stationary_cars = 0  # 정지한 차량 수
+    total_cars = len(cars_dict)  # 전체 차량 수
+    
+    # 차량이 없는 경우 바로 False 반환
+    if total_cars == 0:
+        return False
+    
+    # 모든 차량에 대해 사고 여부 확인
+    for car_id, data in cars_dict.items():
+        
+        # 각 차량의 마지막 100 프레임 동안의 x, y 좌표 리스트 가져오기
+        centers = data[0][-100:]  # 중심점 리스트에서 마지막 100 프레임의 좌표 가져오기
+        x_positions = [pos[0] for pos in centers]  # x 좌표 리스트 (한 차량에 대해)
+        y_positions = [pos[1] for pos in centers]  # y 좌표 리스트 (한 차량에 대해)
+        
+        # x_positions의 길이가 1 이하일 경우 건너뛰기
+        if len(x_positions) <= 1:
+            continue
+        
+        # 변화 없는 프레임 수 카운트
+        stationary_frames = 0
+        threshold = 2  # 임계값 설정 (예: 2 픽셀 이하의 변화는 정지로 판단)
+
+        # 한 차량에 대해 계산 (100프레임동안)
+        for i in range(1, len(x_positions)):
+            x_diff = abs(x_positions[i] - x_positions[i-1])
+            y_diff = abs(y_positions[i] - y_positions[i-1])
+            
+            # 변화량이 임계값 이하인 경우 stationary_frames 증가
+            if x_diff < threshold and y_diff < threshold:
+                stationary_frames += 1
+                
+            print('stationary_frames: ', stationary_frames)
+        
+        ################### 이번 차량 계산 종료
+        
+        # 비율 계산 (50% 이상 멈춰있으면 사고로 간주 -> 100 프레임 동안 한 차량이)
+        stationary_ratio = stationary_frames / (len(x_positions) - 1)
+        print(stationary_ratio)
+        
+        # 차량이 50% 이상의 프레임 동안 멈춰있다면 사고로 판단 -> 한 차량에서 프레임 중 50% 이상 멈춰있으면
+        if stationary_ratio >= 0.5:
+            stationary_cars += 1  # 정지한 차량 수 증가
+            
+     # 정지한 차량이 전체의 50% 이상이면 사고로 판단
+    if stationary_cars / total_cars >= 0.5:
+        return True
+    
+    return False
+
+if __name__ == "__main__":
+    cars_dict = {
+        '1': [
+            [[1, 1], [2, 2]],  # 중심점 리스트
+            ],
+        '2' : [
+            [[2, 2],[5, 5]],  # 중심점 리스트
+            ],
+        '3' : [
+            [[4, 4], [10, 10]],  # 중심점 리스트
+            ]
+    }
+    
+    print(stop_detection(cars_dict))
